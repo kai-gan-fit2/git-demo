@@ -1,39 +1,43 @@
-FROM jumpserver/lion-base:20260303_032936 AS stage-build
+FROM jumpserver/koko-base:20251229_100745 AS stage-build
+
+WORKDIR /opt/koko
 ARG TARGETARCH
-
-ARG GOPROXY=https://goproxy.io
-ENV CGO_ENABLED=0
-ENV GO111MODULE=on
-
 COPY . .
-
-WORKDIR /opt/lion/ui
-
-RUN yarn build
-
-WORKDIR /opt/lion/
 
 ARG VERSION
 ENV VERSION=$VERSION
 
-RUN export GOFlAGS="-X 'main.Buildstamp=`date -u '+%Y-%m-%d %I:%M:%S%p'`'" \
-    && export GOFlAGS="${GOFlAGS} -X 'main.Githash=`git rev-parse HEAD`'" \
-    && export GOFlAGS="${GOFlAGS} -X 'main.Goversion=`go version`'" \
-    && export GOFlAGS="${GOFlAGS} -X 'main.Version=${VERSION}'" \
-    && go build -trimpath -x -ldflags "$GOFlAGS" -o lion .
+WORKDIR /opt/koko/ui
+RUN yarn build
 
-RUN chmod +x entrypoint.sh
+WORKDIR /opt/koko
+RUN make build -s \
+    && set -x && ls -al . \
+    && mv /opt/koko/build/koko /opt/koko/koko \
+    && mv /opt/koko/bin/rawhelm /opt/koko/bin/helm \
+    && mv /opt/koko/bin/rawkubectl /opt/koko/bin/kubectl
 
-FROM jumpserver/guacd:1.5.5-trixie
+RUN mkdir /opt/koko/release \
+    && mv /opt/koko/locale /opt/koko/release \
+    && mv /opt/koko/config_example.yml /opt/koko/release \
+    && mv /opt/koko/entrypoint.sh /opt/koko/release \
+    && mv /opt/koko/utils/init-kubectl.sh /opt/koko/release \
+    && chmod 755 /opt/koko/release/entrypoint.sh /opt/koko/release/init-kubectl.sh
+
+FROM debian:trixie
 ARG TARGETARCH
 ENV LANG=en_US.UTF-8
-USER root
-ARG DEPENDENCIES="                    \
-        ca-certificates               \
-        supervisor"
 
-ARG PREFIX_DIR=/opt/guacamole
-ENV LD_LIBRARY_PATH=${PREFIX_DIR}/lib
+LABEL org.opencontainers.image.source=https://github.com/jumpserver/koko
+LABEL org.opencontainers.image.description="JumpServer Koko"
+
+
+ARG DEPENDENCIES="                    \
+        bash-completion               \
+        jq                            \
+        less                          \
+        redis-tools                   \
+        ca-certificates"
 
 ARG APT_MIRROR=http://deb.debian.org
 
@@ -42,29 +46,26 @@ RUN set -ex \
     && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
     && apt-get update \
     && apt-get install -y --no-install-recommends ${DEPENDENCIES} \
-    && apt-get install -y --no-install-recommends $(cat "${PREFIX_DIR}"/DEPENDENCIES) \
     && apt-get clean all \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /lib32 /libx32
+    && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /opt/lion
+WORKDIR /opt/koko
 
-COPY --from=stage-build /usr/local/bin/check /usr/local/bin/check
-COPY --from=stage-build /opt/lion/ui/dist ui/dist/
-COPY --from=stage-build /opt/lion/lion .
-COPY --from=stage-build /opt/lion/config_example.yml .
-COPY --from=stage-build /opt/lion/entrypoint.sh .
-COPY --from=stage-build /opt/lion/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY --from=stage-build /opt/koko/.kubectl_aliases /opt/kubectl-aliases/.kubectl_aliases
+COPY --from=stage-build /opt/koko/bin /usr/local/bin
+COPY --from=stage-build /opt/koko/lib /usr/local/lib
+COPY --from=stage-build /opt/koko/release .
+COPY --from=stage-build /opt/koko/koko .
 
 ARG VERSION
-ENV VERSION=$VERSION
+ENV VERSION=${VERSION}
 
-VOLUME /opt/lion/data
+VOLUME /opt/koko/data
 
 ENTRYPOINT ["./entrypoint.sh"]
 
-EXPOSE 8081
+EXPOSE 2222
 
 STOPSIGNAL SIGQUIT
 
-CMD [ "supervisord", "-c", "/etc/supervisor/supervisord.conf" ]
+CMD [ "./koko" ]
